@@ -1,0 +1,27 @@
+# Core SDN frameworks
+ryu==4.34
+pox
+
+# Mininet (usually installed via system package, reference only)
+mininet
+
+# Networking & packet analysis
+scapy
+netaddr
+
+# Data handling & ML detection
+numpy
+pandas
+scikit-learn
+
+# Visualization (traffic graphs, anomaly visualization)
+matplotlib
+seaborn
+
+# Logging & utilities
+pyyaml
+tqdm
+loguru
+
+# Testing
+pytest
