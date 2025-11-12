@@ -1,58 +1,50 @@
-# traffic_monitor.py - detection module
 # detection/traffic_monitor.py
-"""
-Traffic Monitor for SDN Self-Defending Network
-Collects traffic statistics and helps detect suspicious behavior.
-"""
 
-from collections import defaultdict
 import time
-import logging
-import os
-
-# Setup logging to file
-log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
-os.makedirs(log_dir, exist_ok=True)
-logging.basicConfig(
-    filename=os.path.join(log_dir, "traffic.log"),
-    level=logging.INFO,
-    format="%(asctime)s - %(message)s"
-)
+from collections import defaultdict
+from ryu.lib.packet import icmp, tcp
 
 class TrafficMonitor:
-    def __init__(self):
-        # Dictionary: {src_ip: packet_count}
-        self.packet_counts = defaultdict(int)
-        # Dictionary: {src_ip: syn_count}
-        self.syn_counts = defaultdict(int)
-
-    def log_packet(self, src_ip, dst_ip, proto=None, flags=None):
-        """Log packet details and update counts."""
-        self.packet_counts[src_ip] += 1
-        logging.info(f"Packet {src_ip} -> {dst_ip}, proto={proto}, flags={flags}")
-
-        # Detect SYN packets (for SYN flood monitoring)
-        if proto == "TCP" and flags == "S":  # SYN flag only
-            self.syn_counts[src_ip] += 1
-
-    def detect_anomaly(self, threshold=50):
-        """
-        Check if any IP exceeds packet threshold.
-        Returns list of suspicious IPs.
-        """
-        suspicious = []
-        for ip, count in self.syn_counts.items():
-            if count > threshold:
-                suspicious.append(ip)
-                logging.warning(f"🚨 Suspicious IP detected: {ip}, SYN count={count}")
-        return suspicious
-
-if __name__ == "__main__":
-    monitor = TrafficMonitor()
-
-    # Example usage (for testing only)
-    for i in range(60):
-        monitor.log_packet("10.0.0.100", "10.0.0.2", proto="TCP", flags="S")
+    """A class to monitor and collect traffic statistics for flow analysis."""
     
-    suspects = monitor.detect_anomaly(threshold=50)
-    print("Suspicious IPs:", suspects)
+    def __init__(self):
+        self.flow_stats = defaultdict(lambda: {
+            'packet_count': 0, 'byte_count': 0, 'syn_count': 0, 
+            'fin_count': 0, 'rst_count': 0, 'ack_count': 0, 
+            'icmp_count': 0, 'start_time': time.time()
+        })
+    
+    def collect_stats(self, pkt, ip_pkt, msg_len):
+        """
+        Updates statistics for a given flow based on the incoming packet.
+        """
+        src_ip = ip_pkt.src
+        dst_ip = ip_pkt.dst
+        flow_key = (src_ip, dst_ip)
+        
+        stats = self.flow_stats[flow_key]
+        stats['packet_count'] += 1
+        stats['byte_count'] += msg_len
+        
+        tcp_pkt = pkt.get_protocol(tcp.tcp)
+        if tcp_pkt:
+            if tcp_pkt.bits & 2: stats['syn_count'] += 1    # SYN
+            if tcp_pkt.bits & 1: stats['fin_count'] += 1    # FIN
+            if tcp_pkt.bits & 4: stats['rst_count'] += 1    # RST
+            if tcp_pkt.bits & 16: stats['ack_count'] += 1   # ACK
+            
+        if pkt.get_protocol(icmp.icmp):
+            stats['icmp_count'] += 1
+            
+    def get_and_clear_stats(self):
+        """
+        Returns the current statistics and clears the internal state.
+        This is called periodically by the detection module.
+        """
+        current_stats = self.flow_stats
+        self.flow_stats = defaultdict(lambda: {
+            'packet_count': 0, 'byte_count': 0, 'syn_count': 0, 
+            'fin_count': 0, 'rst_count': 0, 'ack_count': 0, 
+            'icmp_count': 0, 'start_time': time.time()
+        })
+        return current_stats

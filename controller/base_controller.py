@@ -1,180 +1,178 @@
-# intelligent_controller.py
-import atexit
+# controller/base_controller.py
+import sys
+import os
 import time
-from collections import defaultdict
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import joblib
-import pandas as pd
+import atexit
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
-from ryu.controller.handler import set_ev_cls
-from ryu.lib import hub
-from ryu.lib.packet import ethernet, icmp, ipv4, packet, tcp
+from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
+from ryu.lib.packet import packet, ethernet, ipv4
 from ryu.ofproto import ofproto_v1_3
+from ryu.topology import event
 
+# --- Import the topology discovery library ---
+from ryu.topology import switches
+
+# --- FIXED: Import the correct REST API components ---
+from ryu.app.wsgi import WSGIApplication
+
+# --- Import our custom modules ---
+from detection.traffic_monitor import TrafficMonitor
+from detection.attack_detection import AttackDetector
+from firewall.mitigation import MitigationManager
+from visualization.visualizer import Visualizer 
 
 class IntelligentController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    
+    # --- FIXED: Only include necessary contexts ---
+    _CONTEXTS = {
+        'switches': switches.Switches,
+        'wsgi': WSGIApplication
+    }
 
     def __init__(self, *args, **kwargs):
         super(IntelligentController, self).__init__(*args, **kwargs)
+        self.logger.info("--- Initializing Intelligent SDN Controller ---")
+
         self.mac_to_port = {}
         self.datapaths = {}
-        
-        # --- LOAD THE TRAINED MODEL ---
-        try:
-            self.model = joblib.load('intelligent_ddos_model.joblib')
-            self.logger.info("Successfully loaded ML model 'intelligent_ddos_model.joblib'.")
-        except FileNotFoundError:
-            self.logger.error("Could not load model. Make sure 'intelligent_ddos_model.joblib' is in the same directory.")
-            self.model = None
 
-        # --- MODIFIED: Using a dictionary to store {ip: attack_type} ---
-        self.blocked_attackers = {}
-        
-        # Data structures for real-time analysis
-        self.flow_stats = defaultdict(lambda: {
-            'packet_count': 0, 'byte_count': 0, 'syn_count': 0, 'fin_count': 0,
-            'rst_count': 0, 'ack_count': 0, 'icmp_count': 0, 'start_time': time.time()
-        })
-        self.prediction_interval = 5  # seconds
+        # --- Initialize WSGI (REST API will be available through ofctl_rest app) ---
+        wsgi = kwargs['wsgi']
+        self.logger.info("WSGI application initialized")
 
-        # Start the thread to periodically make predictions
-        self.prediction_thread = hub.spawn(self._predict_and_mitigate)
+        config = {
+            'model_path': 'intelligent_ddos_model.joblib',
+            'prediction_interval': 5
+        }
+
+        self.monitor = TrafficMonitor()
+        self.mitigator = MitigationManager(self.logger)
         
-        # Register the shutdown handler
+        # Create detector first (without visualizer reference)
+        self.detector = AttackDetector(config, self.logger, self.monitor, self)
+        
+        # Create visualizer with detector reference
+        self.visualizer = Visualizer(self.logger, self.monitor, self.detector)
+        
         atexit.register(self._shutdown_handler)
-        self.logger.info("Intelligent Controller Started. Defenses are active.")
-    
+
     def _shutdown_handler(self):
-        """Prints a detailed summary when the controller is stopped."""
         self.logger.info("Controller is shutting down. Generating attack summary...")
-        num_attackers = len(self.blocked_attackers)
         
-        # --- MODIFIED: New, more detailed summary report ---
-        print("\n-----------------------------------------")
-        print("          ATTACK SUMMARY           ")
-        print("-----------------------------------------")
-        print(f"Total Unique Attackers Detected: {num_attackers}")
+        summary = self.detector.get_attack_summary()
+        attack_types = self.detector.get_attacks_by_type()
+        top_victims = self.detector.get_top_victims(top_n=5)
         
-        if num_attackers > 0:
-            print("\nBlocked IP Addresses:")
-            # Sort by IP address for a clean report
-            for ip, attack_type in sorted(self.blocked_attackers.items()):
-                print(f"  - {ip} (Detected as: {attack_type})")
+        print("\n" + "="*60)
+        print("                  FINAL ATTACK SUMMARY                    ")
+        print("="*60)
+        print(f"Total Unique Attackers Blocked: {summary['total_attackers']}")
+        print(f"Total Legitimate Victims Protected: {len(summary.get('known_victims', []))}")
+        
+        if summary['total_attackers'] > 0:
+            print("\n" + "-"*60)
+            print("BLOCKED ATTACKERS:")
+            print("-"*60)
+            for ip, attack_type in sorted(summary['blocked_ips'].items()):
+                print(f"  🚫 {ip:15s} → {attack_type}")
+            
+            if summary.get('known_victims'):
+                print("\n" + "-"*60)
+                print("PROTECTED VICTIMS (NOT BLOCKED):")
+                print("-"*60)
+                for victim_ip in sorted(summary['known_victims']):
+                    print(f"  🛡️  {victim_ip:15s} (Protected)")
+            
+            print("\n" + "-"*60)
+            print("ATTACK TYPES:")
+            print("-"*60)
+            for attack_type, count in attack_types.items():
+                print(f"  • {attack_type}: {count} attacker(s)")
+            
+            if top_victims:
+                print("\n" + "-"*60)
+                print("MOST TARGETED VICTIMS:")
+                print("-"*60)
+                for i, (victim_ip, attack_count) in enumerate(top_victims, 1):
+                    print(f"  {i}. {victim_ip} - attacked {attack_count} time(s)")
+            
+            print("\n" + "-"*60)
+            print("DETAILED ATTACK LOG:")
+            print("-"*60)
+            for i, record in enumerate(summary['attack_records'], 1):
+                timestamp = time.strftime('%H:%M:%S', time.localtime(record['timestamp']))
+                print(f"  [{i}] {timestamp} - {record['attack_type']}")
+                print(f"      Attacker: {record['attacker']} → Victim: {record['victim']}")
         else:
-            print("\nNo attackers were detected during this session.")
+            print("\n✓ No attacks were detected during this session.")
         
-        print("-----------------------------------------")
+        print("="*60 + "\n")
+    
+    def block_attacker(self, attacker_ip, victim_ip=None):
+        """
+        Blocks an attacker's IP address.
+        
+        Args:
+            attacker_ip (str): The IP address of the attacker to block
+            victim_ip (str, optional): The IP address of the victim being attacked
+        """
+        self.logger.warning(f"Blocking attacker: {attacker_ip}")
+        if victim_ip:
+            self.logger.info(f"Victim IP: {victim_ip}")
+        
+        # Block the attacker with optional victim info
+        self.mitigator.block_ip_address(self.datapaths, attacker_ip, victim_ip)
+        
+        # Update visualization to show attacker as blocked
+        self.visualizer.update_node_status(attacker_ip, 'blocked')
 
-    def _predict_and_mitigate(self):
-        """Periodically uses the ML model to predict and block attacks."""
-        while self.model:
-            hub.sleep(self.prediction_interval)
-            if not self.datapaths:
-                continue
+    # The topology events are now automatically sent to this app
+    @set_ev_cls(event.EventSwitchEnter)
+    def handler_switch_enter(self, ev):
+        self.visualizer.handle_switch_enter(ev)
 
-            flows_to_analyze = list(self.flow_stats.items())
-            self.flow_stats.clear()
+    @set_ev_cls(event.EventLinkAdd)
+    def handler_link_add(self, ev):
+        self.visualizer.handle_link_add(ev)
 
-            if not flows_to_analyze:
-                continue
-
-            df_list = []
-            flow_keys = []
-            for src_ip, stats in flows_to_analyze:
-                duration = time.time() - stats['start_time']
-                if duration == 0: duration = self.prediction_interval
-                
-                df_list.append({
-                    'packet_count': stats['packet_count'], 'byte_count': stats['byte_count'],
-                    'syn_count': stats['syn_count'], 'fin_count': stats['fin_count'],
-                    'rst_count': stats['rst_count'], 'ack_count': stats['ack_count'],
-                    'icmp_count': stats['icmp_count'], 'duration_sec': duration
-                })
-                flow_keys.append(src_ip)
-            
-            features_df = pd.DataFrame(df_list, columns=[
-                'packet_count', 'byte_count', 'syn_count', 'fin_count', 'rst_count', 
-                'ack_count', 'icmp_count', 'duration_sec'
-            ])
-            
-            predictions = self.model.predict(features_df)
-
-            for source_ip, prediction in zip(flow_keys, predictions):
-                # --- MODIFIED: Uses the new dictionary to store attack type ---
-                if prediction != 0 and source_ip not in self.blocked_attackers:  # 0 is Benign
-                    attack_type = "SYN Flood" if prediction == 1 else "ICMP Flood"
-                    self.logger.warning(f"{attack_type} Detected from IP: {source_ip}!")
-                    self.logger.warning("Deploying mitigation: Blocking all traffic from this IP.")
-                    self.blocked_attackers[source_ip] = attack_type # Store the IP and attack type
-                    
-                    for datapath in self.datapaths.values():
-                        self._add_block_rule(datapath, source_ip)
-
-    def _add_block_rule(self, datapath, ip_src):
-        """Installs a high-priority flow rule to drop packets."""
-        parser = datapath.ofproto_parser
-        match = parser.OFPMatch(eth_type=0x0800, ipv4_src=ip_src)
-        actions = []
-        inst = [parser.OFPInstructionActions(datapath.ofproto.OFPIT_APPLY_ACTIONS, actions)]
-        mod = parser.OFPFlowMod(
-            datapath=datapath,
-            priority=100,
-            match=match,
-            instructions=inst,
-            hard_timeout=60
-        )
-        datapath.send_msg(mod)
+    @set_ev_cls(event.EventHostAdd)
+    def handler_host_add(self, ev):
+        self.visualizer.handle_host_add(ev)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        ofproto, parser = datapath.ofproto, datapath.ofproto_parser
         self.datapaths[datapath.id] = datapath
+        
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        mod = parser.OFPFlowMod(datapath=datapath, priority=0, match=match, instructions=[
-                                parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)])
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        mod = parser.OFPFlowMod(datapath=datapath, priority=0, match=match, instructions=inst)
         datapath.send_msg(mod)
-        self.logger.info("Switch %d connected.", datapath.id)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
-        msg = ev.msg
-        datapath = msg.datapath
-        in_port = msg.match['in_port']
+        msg, datapath, in_port = ev.msg, ev.msg.datapath, ev.msg.match['in_port']
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
-        if not eth or eth.ethertype == 0x88cc:
-            return
+        if not eth or eth.ethertype == 0x88cc: return
 
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         if ip_pkt:
-            src_ip = ip_pkt.src
-            flow_key = src_ip
+            self.monitor.collect_stats(pkt, ip_pkt, len(msg.data))
 
-            stats = self.flow_stats[flow_key]
-            stats['packet_count'] += 1
-            stats['byte_count'] += len(msg.data)
-            
-            tcp_pkt = pkt.get_protocol(tcp.tcp)
-            if tcp_pkt:
-                if tcp_pkt.bits & 0b000010: stats['syn_count'] += 1
-                if tcp_pkt.bits & 0b000001: stats['fin_count'] += 1
-                if tcp_pkt.bits & 0b000100: stats['rst_count'] += 1
-                if tcp_pkt.bits & 0b010000: stats['ack_count'] += 1
-
-            if pkt.get_protocol(icmp.icmp):
-                stats['icmp_count'] += 1
-        
         self.mac_to_port.setdefault(datapath.id, {})
         self.mac_to_port[datapath.id][eth.src] = in_port
         out_port = self.mac_to_port[datapath.id].get(eth.dst, datapath.ofproto.OFPP_FLOOD)
+        
         actions = [datapath.ofproto_parser.OFPActionOutput(out_port)]
+        
         out = datapath.ofproto_parser.OFPPacketOut(
             datapath=datapath, buffer_id=msg.buffer_id, in_port=in_port,
             actions=actions, data=msg.data)

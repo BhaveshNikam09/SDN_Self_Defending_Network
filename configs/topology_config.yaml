@@ -1,1 +1,5 @@
-# YAML config for configs
+# Settings for the Mininet topology
+controller:
+  ip: "127.0.0.1"
+  port1: 6653
+  port2: 6633
