@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Train ML Model on Real Collected Data
+Train ML Model on Real Collected Data - 6 Attack Types
 Run: python3 train_real_model.py
 """
 
@@ -19,27 +19,32 @@ def train_model():
     data_file = 'ddos_training_data.csv'
     
     print("="*70)
-    print("  TRAINING MODEL ON REAL DATA")
+    print("  TRAINING MODEL ON REAL DATA - 6 ATTACK TYPES")
     print("="*70)
     
-    # Check if data file exists
     if not os.path.exists(data_file):
         print(f"\n❌ Error: '{data_file}' not found!")
         print("\nRun data collection first:")
         print("  ryu-manager controller/data_collection_controller.py")
         return None
     
-    # Load data
     print(f"\n📂 Loading data from: {data_file}")
     df = pd.read_csv(data_file)
     print(f"✓ Loaded {len(df)} samples")
     
-    # Check class distribution
     print("\n" + "="*70)
     print("  CLASS DISTRIBUTION")
     print("="*70)
     label_counts = df['label'].value_counts().sort_index()
-    labels = {0: 'Normal', 1: 'SYN Flood', 2: 'ICMP Flood', 3: 'UDP Flood'}
+    labels = {
+        0: 'Normal',
+        1: 'SYN Flood',
+        2: 'ICMP Flood',
+        3: 'UDP Flood',
+        4: 'ACK Flood',
+        5: 'RST Flood',
+        6: 'HTTP Flood'
+    }
     
     print()
     for label, name in labels.items():
@@ -49,26 +54,21 @@ def train_model():
         status = "✓" if count >= 100 else "⚠"
         print(f"  {status} {label}. {name:12s}: {count:4d} ({percentage:5.1f}%) {bar}")
     
-    # Check minimum samples
     min_samples = label_counts.min() if len(label_counts) > 0 else 0
     if min_samples < 50:
         print(f"\n⚠ Warning: Some classes have < 50 samples!")
-        print("  Recommend collecting more data for better accuracy.")
-        response = input("\nContinue training anyway? (y/n): ")
+        print("  Recommend collecting more data.")
+        response = input("\nContinue anyway? (y/n): ")
         if response.lower() != 'y':
             return None
     
-    # Prepare features
     features = ['packet_count', 'byte_count', 'syn_count', 'fin_count',
                 'rst_count', 'ack_count', 'icmp_count', 'udp_count', 'duration_sec']
     
     X = df[features]
     y = df['label']
-    
-    # Handle missing values
     X = X.fillna(0)
     
-    # Split data
     print("\n" + "="*70)
     print("  TRAIN/TEST SPLIT")
     print("="*70)
@@ -80,15 +80,14 @@ def train_model():
     print(f"  Training samples: {len(X_train)}")
     print(f"  Testing samples:  {len(X_test)}")
     
-    # Train model
     print("\n" + "="*70)
     print("  TRAINING MODEL")
     print("="*70)
     print("\n  Training Random Forest... (this may take a minute)")
     
     model = RandomForestClassifier(
-        n_estimators=150,
-        max_depth=15,
+        n_estimators=200,
+        max_depth=20,
         min_samples_split=5,
         min_samples_leaf=2,
         random_state=42,
@@ -98,7 +97,6 @@ def train_model():
     model.fit(X_train, y_train)
     print("  ✓ Training complete!")
     
-    # Evaluate
     train_score = model.score(X_train, y_train)
     test_score = model.score(X_test, y_test)
     
@@ -110,27 +108,24 @@ def train_model():
     elif test_score >= 0.95:
         print("\n  🎉 Excellent accuracy!")
     
-    # Predictions
     y_pred = model.predict(X_test)
     
-    # Classification report
     print("\n" + "="*70)
     print("  CLASSIFICATION REPORT")
     print("="*70)
-    target_names = ['Normal', 'SYN Flood', 'ICMP Flood', 'UDP Flood']
+    target_names = ['Normal', 'SYN Flood', 'ICMP Flood', 'UDP Flood',
+                    'ACK Flood', 'RST Flood', 'HTTP Flood']
     print(classification_report(y_test, y_pred, target_names=target_names))
     
-    # Confusion matrix
     print("="*70)
     print("  CONFUSION MATRIX")
     print("="*70)
     cm = confusion_matrix(y_test, y_pred)
     print("\n  Rows=Actual | Columns=Predicted\n")
-    print("              Normal  SYN  ICMP  UDP")
+    print("              Norm  SYN  ICMP  UDP  ACK  RST  HTTP")
     for i, row in enumerate(cm):
-        print(f"  {target_names[i]:12s}  {row[0]:3d}   {row[1]:3d}   {row[2]:3d}   {row[3]:3d}")
+        print(f"  {target_names[i]:12s}  {row[0]:3d}  {row[1]:3d}  {row[2]:3d}  {row[3]:3d}  {row[4]:3d}  {row[5]:3d}  {row[6]:3d}")
     
-    # Feature importance
     print("\n" + "="*70)
     print("  FEATURE IMPORTANCE")
     print("="*70)
@@ -144,8 +139,7 @@ def train_model():
         bar = '█' * int(row['importance'] * 50)
         print(f"  {row['feature']:15s}: {row['importance']:.4f}  {bar}")
     
-    # Save model
-    model_filename = 'intelligent_ddos_model_3attacks.joblib'
+    model_filename = 'intelligent_ddos_model_6attacks.joblib'
     joblib.dump(model, model_filename)
     
     print("\n" + "="*70)
@@ -158,23 +152,11 @@ def train_model():
     print("\n" + "="*70)
     print("  NEXT STEPS")
     print("="*70)
-    print("\n  1. Update controller config (Line 49-52):")
-    print("     File: controller/base_controller.py")
+    print("\n  1. Update controller config:")
+    print("     File: controller/base_controller.py (Line 50)")
     print("     Change:")
-    print("       config = {")
-    print("           'model_path': 'intelligent_ddos_model_3attacks.joblib',")
-    print("           'prediction_interval': 5")
-    print("       }")
-    print("\n  2. Update attack detection (Line 11-16):")
-    print("     File: detection/attack_detection.py")
-    print("     Change:")
-    print("       ATTACK_TYPES = {")
-    print("           0: 'Normal',")
-    print("           1: 'SYN Flood',")
-    print("           2: 'ICMP Flood',")
-    print("           3: 'UDP Flood'  # ← ADD THIS LINE")
-    print("       }")
-    print("\n  3. Start controller:")
+    print("       'model_path': 'intelligent_ddos_model_6attacks.joblib',")
+    print("\n  2. Restart controller:")
     print("     ryu-manager --observe-links controller/base_controller.py")
     print("\n" + "="*70 + "\n")
     

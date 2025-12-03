@@ -1,5 +1,5 @@
 # Settings for the intelligent controller
-model_path: "intelligent_ddos_model.joblib"
+model_path: "intelligent_ddos_model_6attacks.joblib"
 prediction_interval: 5
 web_server:
   host: "0.0.0.0"

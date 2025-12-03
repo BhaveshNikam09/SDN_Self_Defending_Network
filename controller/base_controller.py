@@ -44,10 +44,12 @@ class IntelligentController(app_manager.RyuApp):
         wsgi = kwargs['wsgi']
         self.logger.info("WSGI application initialized")
 
+        # ========== CONFIG (LINE 49-52) ==========
         config = {
-            'model_path': 'intelligent_ddos_model.joblib',
+            'model_path': 'intelligent_ddos_model_6attacks.joblib',  # ← CHANGE THIS
             'prediction_interval': 5
         }
+        # =========================================
 
         self.monitor = TrafficMonitor()
         self.mitigator = MitigationManager(self.logger)
