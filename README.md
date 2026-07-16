@@ -2,7 +2,6 @@
 
 A Software Defined Networking (SDN) security system that detects and automatically blocks DDoS attacks in real time, using a Ryu controller for network monitoring, Mininet for network simulation, and a machine learning model for attack detection — with a live UI to visualize traffic and manage blocked IPs.
 
-> ⚠️ **Results section is a placeholder** — add your real accuracy/performance numbers once you have them finalized. A couple of minor `[FILL IN]` spots (like your Python version and UI stack) are also left for you to confirm.
 
 ![Status](https://img.shields.io/badge/status-active-success)
 ![Python](https://img.shields.io/badge/python-3.x-blue)
